@@ -1,0 +1,28 @@
+{
+    "name": "Pylontech Battery",
+    "version": "0.1.0",
+    "slug": "pylon",
+    "description": "Monitors a pylontech battery stack",
+    "arch": ["amd64", "armv7", "i386"],
+    "startup": "application",
+    "boot": "auto",
+    "privileged": ["SYS_RAWIO"],
+    "uart": true,
+    "init": false,
+    "options": {
+        "device": null,
+        "mqtt_server": "core-mosquitto",
+        "mqtt_user": null,
+        "mqtt_pass": null,
+        "mqtt_client_id": null,
+        "mqtt_topic": "power/pylon"
+    },
+    "schema": {
+        "device": "str",
+        "mqtt_server": "str",
+        "mqtt_user": "str",
+        "mqtt_pass": "str",
+        "mqtt_client_id": "str",
+        "mqtt_topic": "str"
+    }
+}
