@@ -88,7 +88,7 @@ def get_power(device):
             l["Vlow"] = int(l["Vlow"])
             l["Vhigh"] = int(l["Vhigh"])
             l["Coulomb"] = int(l["Coulomb"][:-1])
-            l["MosTempr"] = int(l["MosTempr"])
+            l["MosTempr"] = int(l["MosTempr"]) if l["MosTempr"] != '-' else None
 
         return items
     except Exception as e:
