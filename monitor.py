@@ -10,6 +10,16 @@ import paho.mqtt.client as mqtt
 MARK_BEGIN = b"\n\r@\r\r\n"
 MARK_END = b"\r\n\rCommand completed successfully\r\n\r$$\r\n\rpylon>"
 
+MAX_PROBE_TRIES = 3
+
+def probe(file):
+    try:
+        os.write(file, b"\n")
+        time.sleep(0.01)
+        os.read(file, 256)
+        return True
+    except Exception:
+        time.sleep(0.5)
 
 def mqtt_connect(*, server, username, password, client_id):
     client = mqtt.Client(client_id=client_id)
@@ -26,6 +36,14 @@ def serial_command(device, command, *, retries=1):
             file = os.open(device, os.O_RDWR | os.O_NONBLOCK)
         except Exception as e:
             raise RuntimeError(f"Error opening device {device}") from e
+
+        tries = 0
+        while True:
+            if tries > MAX_PROBE_TRIES:
+                raise RuntimeError("Probing failed")
+            tries += 1
+            if probe(file):
+                break
 
         os.write(file, command_bytes + b"\n")
 
