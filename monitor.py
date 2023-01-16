@@ -4,6 +4,8 @@ import argparse
 import time
 import json
 import os
+import re
+
 import paho.mqtt.client as mqtt
 
 
@@ -62,33 +64,41 @@ def serial_command(device, command, *, retries=1):
 def get_power(device):
     response = serial_command(device, "pwr")
     try:
-        lines = [[f.strip() for f in l.split(" ") if f.strip()] for l in response.split("\n")]
-        if lines[0] != ["Power", "Volt", "Curr", "Tempr", "Tlow", "Thigh", "Vlow", "Vhigh", "Base.St", "Volt.St", "Curr.St", "Temp.St", "Coulomb", "Time", "B.V.St", "B.T.St", "MosTempr", "M.T.St"]:
-            raise AssertionError("Table columns different than expected")
+        lines = response.split("\n")
 
-        stateidx = lines[0].index("Base.St")
-        lines = [l for l in lines if l[stateidx] != "Absent"]
+        colstart = [0]
+        for m in re.findall(r"([^ ]+ +)", lines[0].rstrip()):
+            colstart.append(colstart[-1] + len(m))
 
-        timeidx = lines[0].index("Time")
-        for l in lines[1:]:
-            l[timeidx] = l[timeidx] + " " + l.pop(timeidx + 1)
+        def getcell(line, cellno):
+            linelen = len(line)
+            offset1 = min(linelen, colstart[cellno])
+            if offset1 and line[offset1-1] != " ":
+                offset1 -= 1
+            offset2 = min(linelen, colstart[cellno+1] if cellno+1 < len(colstart) else len(line))
+            if line[offset2-1] != " ":
+                offset2 -= 1
+            return line[offset1:offset2].strip()
 
-        for l in lines:
-            if len(l) != len(lines[0]):
-                raise AssertionError("Table row has incorrect number of items")
+        headers = [getcell(lines[0], i) for i in range(len(colstart))]
 
-        items = [dict(zip(lines[0], l)) for l in lines[1:]]
-        for l in items:
-            l["Power"] = int(l["Power"])
-            l["Volt"] = int(l["Volt"])
-            l["Curr"] = int(l["Curr"])
-            l["Tempr"] = int(l["Tempr"])
-            l["Tlow"] = int(l["Tlow"])
-            l["Thigh"] = int(l["Thigh"])
-            l["Vlow"] = int(l["Vlow"])
-            l["Vhigh"] = int(l["Vhigh"])
-            l["Coulomb"] = int(l["Coulomb"][:-1])
-            l["MosTempr"] = int(l["MosTempr"])
+        items = []
+        for line in lines[1:]:
+            values = [getcell(line, i) for i in range(len(colstart))]
+            item = dict(zip(headers, values))
+            if item["Base.St"] == "Absent":
+                continue
+
+            for k in ("Power", "Volt", "Curr", "Tempr", "Tlow", "Thigh", "Vlow", "Vhigh", "MosTempr"):
+                try:
+                    item[k] = int(item[k])
+                except Exception:
+                    pass
+            try:
+                item["Coulomb"] = int(item["Coulomb"][:-1])
+            except Exception:
+                pass
+            items.append(item)
 
         return items
     except Exception as e:
