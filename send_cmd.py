@@ -10,6 +10,6 @@ if __name__ == "__main__":
     parser.add_argument("command", help="Command to send")
     args = parser.parse_args()
 
-    response = serial_command(args.device, args.command)
+    response = serial_command(args.device, args.command, checkframe=False)
     print(f"Response length: {len(response)}")
     print(response)

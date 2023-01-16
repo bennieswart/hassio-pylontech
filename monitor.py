@@ -9,8 +9,9 @@ import re
 import paho.mqtt.client as mqtt
 
 
+MARK_PROMPT = b"\rpylon>"
 MARK_BEGIN = b"\n\r@\r\r\n"
-MARK_END = b"\r\n\rCommand completed successfully\r\n\r$$\r\n\rpylon>"
+MARK_END = b"\r\n\rCommand completed successfully\r\n\r$$\r\n" + MARK_PROMPT
 
 
 def mqtt_connect(*, server, username, password, client_id):
@@ -20,9 +21,10 @@ def mqtt_connect(*, server, username, password, client_id):
     return client
 
 
-def serial_command(device, command, *, retries=1):
+def serial_command(device, command, *, retries=1, checkframe=True):
     print(f"Sending command {command}")
     command_bytes = command.encode()
+    mark_end = MARK_END if checkframe else MARK_PROMPT
     try:
         try:
             file = os.open(device, os.O_RDWR | os.O_NONBLOCK)
@@ -33,7 +35,7 @@ def serial_command(device, command, *, retries=1):
 
         response = b""
         timeout_counter = 0
-        while MARK_END not in response:
+        while mark_end not in response:
             if timeout_counter > 1000:
                 raise RuntimeError("Read operation timed out")
             timeout_counter += 1
@@ -43,22 +45,26 @@ def serial_command(device, command, *, retries=1):
                 time.sleep(0.02)
 
         response = response.rstrip()
-        if not (response.startswith(command.encode() + MARK_BEGIN) and response.endswith(MARK_END)):
-            raise Exception("Response frame corrupt")
-        response = response[len(command) + len(MARK_BEGIN):-len(MARK_END)]
+        if checkframe:
+            if not (response.startswith(command.encode() + MARK_BEGIN) and response.endswith(mark_end)):
+                raise Exception("Response frame corrupt")
+            response = response[len(command) + len(MARK_BEGIN):-len(mark_end)]
         return response.decode()
     except Exception as e:
-        if retries:
-            print(f"Error sending command {command}, {retries} retries remaining")
-            time.sleep(0.1)
-            os.write(file, b"\n") # Try to clear prompt and recover
-            return serial_command(device, command, retries=retries-1)
-        raise RuntimeError(f"Error sending command {command}")
+        if not retries:
+            raise RuntimeError(f"Error sending command {command}")
     finally:
         try:
             os.close(file)
         except Exception:
             pass
+    print(f"Error sending command {command}, {retries} retries remaining")
+    time.sleep(0.1)
+    try:
+        serial_command(device, "", retries=0, checkframe=False) # Try to clear prompt and recover
+    except Exception:
+        pass
+    return serial_command(device, command, retries=retries-1)
 
 
 def get_power(device):
