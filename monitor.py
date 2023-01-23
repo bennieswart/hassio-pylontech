@@ -5,6 +5,7 @@ import time
 import json
 import os
 import re
+from select import select
 
 import paho.mqtt.client as mqtt
 
@@ -31,18 +32,21 @@ def serial_command(device, command, *, retries=1, checkframe=True):
         except Exception as e:
             raise RuntimeError(f"Error opening device {device}") from e
 
+        ready = select([], [file], [], 1)
+        if not ready[1]:
+            raise RuntimeError("Write operation timed out")
         os.write(file, command_bytes + b"\n")
 
         response = b""
         timeout_counter = 0
         while mark_end not in response:
-            if timeout_counter > 1000:
+            if timeout_counter > 5:
                 raise RuntimeError("Read operation timed out")
-            timeout_counter += 1
-            try:
-                response += os.read(file, 256)
-            except Exception:
-                time.sleep(0.02)
+            ready = select([file], [], [], 1)
+            if not ready[0]:
+                timeout_counter += 1
+                continue
+            response += os.read(file, 256)
 
         response = response.rstrip()
         if checkframe:
