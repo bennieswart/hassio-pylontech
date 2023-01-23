@@ -4,11 +4,15 @@ import argparse
 import time
 import json
 import os
+import re
+from select import select
+
 import paho.mqtt.client as mqtt
 
 
+MARK_PROMPT = b"\rpylon>"
 MARK_BEGIN = b"\n\r@\r\r\n"
-MARK_END = b"\r\n\rCommand completed successfully\r\n\r$$\r\n\rpylon>"
+MARK_END = b"\r\n\rCommand completed successfully\r\n\r$$\r\n" + MARK_PROMPT
 
 
 def mqtt_connect(*, server, username, password, client_id):
@@ -18,77 +22,93 @@ def mqtt_connect(*, server, username, password, client_id):
     return client
 
 
-def serial_command(device, command, *, retries=1):
+def serial_command(device, command, *, retries=1, checkframe=True):
     print(f"Sending command {command}")
     command_bytes = command.encode()
+    mark_end = MARK_END if checkframe else MARK_PROMPT
     try:
         try:
             file = os.open(device, os.O_RDWR | os.O_NONBLOCK)
         except Exception as e:
             raise RuntimeError(f"Error opening device {device}") from e
 
+        ready = select([], [file], [], 1)
+        if not ready[1]:
+            raise RuntimeError("Write operation timed out")
         os.write(file, command_bytes + b"\n")
 
         response = b""
         timeout_counter = 0
-        while MARK_END not in response:
-            if timeout_counter > 1000:
+        while mark_end not in response:
+            if timeout_counter > 5:
                 raise RuntimeError("Read operation timed out")
-            timeout_counter += 1
-            try:
-                response += os.read(file, 256)
-            except Exception:
-                time.sleep(0.02)
+            ready = select([file], [], [], 1)
+            if not ready[0]:
+                timeout_counter += 1
+                continue
+            response += os.read(file, 256)
 
         response = response.rstrip()
-        if not (response.startswith(command.encode() + MARK_BEGIN) and response.endswith(MARK_END)):
-            raise Exception("Response frame corrupt")
-        response = response[len(command) + len(MARK_BEGIN):-len(MARK_END)]
+        if checkframe:
+            if not (response.startswith(command.encode() + MARK_BEGIN) and response.endswith(mark_end)):
+                raise Exception("Response frame corrupt")
+            response = response[len(command) + len(MARK_BEGIN):-len(mark_end)]
         return response.decode()
     except Exception as e:
-        if retries:
-            print(f"Error sending command {command}, {retries} retries remaining")
-            time.sleep(0.1)
-            os.write(file, b"\n") # Try to clear prompt and recover
-            return serial_command(device, command, retries=retries-1)
-        raise RuntimeError(f"Error sending command {command}")
+        if not retries:
+            raise RuntimeError(f"Error sending command {command}")
     finally:
         try:
             os.close(file)
         except Exception:
             pass
+    print(f"Error sending command {command}, {retries} retries remaining")
+    time.sleep(0.1)
+    try:
+        serial_command(device, "", retries=0, checkframe=False) # Try to clear prompt and recover
+    except Exception:
+        pass
+    return serial_command(device, command, retries=retries-1)
 
 
 def get_power(device):
     response = serial_command(device, "pwr")
     try:
-        lines = [[f.strip() for f in l.split(" ") if f.strip()] for l in response.split("\n")]
-        if lines[0] != ["Power", "Volt", "Curr", "Tempr", "Tlow", "Thigh", "Vlow", "Vhigh", "Base.St", "Volt.St", "Curr.St", "Temp.St", "Coulomb", "Time", "B.V.St", "B.T.St", "MosTempr", "M.T.St"]:
-            raise AssertionError("Table columns different than expected")
+        lines = response.split("\n")
 
-        stateidx = lines[0].index("Base.St")
-        lines = [l for l in lines if l[stateidx] != "Absent"]
+        colstart = [0]
+        for m in re.findall(r"([^ ]+ +)", lines[0].rstrip()):
+            colstart.append(colstart[-1] + len(m))
 
-        timeidx = lines[0].index("Time")
-        for l in lines[1:]:
-            l[timeidx] = l[timeidx] + " " + l.pop(timeidx + 1)
+        def getcell(line, cellno):
+            linelen = len(line)
+            offset1 = min(linelen, colstart[cellno])
+            if offset1 and line[offset1-1] != " ":
+                offset1 -= 1
+            offset2 = min(linelen, colstart[cellno+1] if cellno+1 < len(colstart) else len(line))
+            if line[offset2-1] != " ":
+                offset2 -= 1
+            return line[offset1:offset2].strip()
 
-        for l in lines:
-            if len(l) != len(lines[0]):
-                raise AssertionError("Table row has incorrect number of items")
+        headers = [getcell(lines[0], i) for i in range(len(colstart))]
 
-        items = [dict(zip(lines[0], l)) for l in lines[1:]]
-        for l in items:
-            l["Power"] = int(l["Power"])
-            l["Volt"] = int(l["Volt"])
-            l["Curr"] = int(l["Curr"])
-            l["Tempr"] = int(l["Tempr"])
-            l["Tlow"] = int(l["Tlow"])
-            l["Thigh"] = int(l["Thigh"])
-            l["Vlow"] = int(l["Vlow"])
-            l["Vhigh"] = int(l["Vhigh"])
-            l["Coulomb"] = int(l["Coulomb"][:-1])
-            l["MosTempr"] = int(l["MosTempr"])
+        items = []
+        for line in lines[1:]:
+            values = [getcell(line, i) for i in range(len(colstart))]
+            item = dict(zip(headers, values))
+            if item["Base.St"] == "Absent":
+                continue
+
+            for k in ("Power", "Volt", "Curr", "Tempr", "Tlow", "Thigh", "Vlow", "Vhigh", "MosTempr"):
+                try:
+                    item[k] = int(item[k])
+                except Exception:
+                    pass
+            try:
+                item["Coulomb"] = int(item["Coulomb"][:-1])
+            except Exception:
+                pass
+            items.append(item)
 
         return items
     except Exception as e:
